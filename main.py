@@ -123,7 +123,7 @@ def inject_qr_extras(html: str, content_qr: str) -> str:
     If the extras are already injected (idempotent), skip.
     """
     import re
-    insight_url = f"https://insight.nexpo.vn/{content_qr}"
+    insight_url = f"https://insights.nexpo.vn/{content_qr}"
     if insight_url in html:
         return html  # already injected
 
