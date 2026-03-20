@@ -811,15 +811,55 @@ Do NOT split the outer card, header, greeting, section headers, QR, or footer in
    - Bottom: "Đây là email tự động, vui lòng không trả lời. / This is an automated email, please do not reply." in #64748B, 12px, font-style: italic
 
 ═══════════════════════════════════════════════
+DARK MODE SUPPORT — REQUIRED:
+═══════════════════════════════════════════════
+Many email clients (Apple Mail, iOS Mail, Outlook 2019+) apply dark mode and invert or replace colors, making text unreadable. You MUST include dark mode protection.
+
+Add a <style> block inside <head> with these exact rules:
+  <style>
+    /* Force light mode on supported clients */
+    :root {{ color-scheme: light only; }}
+    /* Prevent iOS Mail dark mode inversion */
+    @media (prefers-color-scheme: dark) {{
+      body, table, td, th, p, span, a, div {{
+        background-color: inherit !important;
+        color: inherit !important;
+      }}
+      /* Re-enforce all critical colors explicitly */
+      .email-body {{ background-color: #F0F4F8 !important; }}
+      .card {{ background-color: #FFFFFF !important; }}
+      .header {{ background-color: #1a1a2e !important; }}
+      .detail-label {{ color: #64748B !important; }}
+      .detail-value {{ color: #1E293B !important; }}
+      .footer-section {{ background-color: #1E293B !important; }}
+      .footer-text {{ color: #94A3B8 !important; }}
+    }}
+  </style>
+
+Also add <meta name="color-scheme" content="light only"> in <head>.
+
+Add these helper classes (alongside inline styles — classes are for dark mode override only):
+  - class="email-body" on the outermost <table>
+  - class="card" on the card container <table>
+  - class="header" on the header <td>
+  - class="detail-label" on every label <td> in the registration rows
+  - class="detail-value" on every value <td> in the registration rows
+  - class="footer-section" on the footer <td>
+  - class="footer-text" on footer text elements
+
+⚠️ IMPORTANT: Keep ALL existing inline styles (style="...") — classes are ADDITIONS, not replacements. Both inline styles AND classes must be present together.
+
+═══════════════════════════════════════════════
 STRICT RULES:
 ═══════════════════════════════════════════════
 - Return ONLY the raw HTML. No markdown fences, no explanation, no comments outside HTML.
-- ALL CSS must be inline (style="..."). Zero <style> tags, zero classes.
+- ALL CSS must be inline (style="...") PLUS the dark mode <style> block described above.
 - Use table/tr/td for ALL layout — no div-based layout (email client compatibility).
 - Every ${{uuid}} variable must appear exactly as written — never substitute with label text.
 - Use {{event_name}} (curly braces, NO dollar sign) only if referencing the event name dynamically outside the header.
 - border-radius on tables: use on the outer wrapper td, not on the table element itself for Outlook compat.
 - For gradient backgrounds on table cells, use: background: #1a1a2e; (solid fallback first, then background-image: linear-gradient(...))
+- Always specify explicit color and background-color on EVERY td, p, span, a element — never rely on inherited/default colors.
 
 Generate the complete HTML email now:"""
 
