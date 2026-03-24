@@ -20,7 +20,17 @@ app = FastAPI(title="QR Code Generator API", version="1.0.0")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://app.nexpo.vn", "http://app.nexpo.vn", "https://admin.nexpo.vn", "http://localhost:3000", "http://localhost:3001"],
+    allow_origins=[
+        "https://app.nexpo.vn",
+        "http://app.nexpo.vn",
+        "https://admin.nexpo.vn",
+        "https://portal.nexpo.vn",
+        "https://insights.nexpo.vn",
+        "http://localhost:3000",   # nexpo-admin dev
+        "http://localhost:3001",   # nexpo-public dev
+        "http://localhost:3002",   # nexpo-insight dev
+        "http://localhost:3003",   # nexpo-portal dev
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -145,7 +155,7 @@ def inject_qr_extras(html: str, content_qr: str) -> str:
         'color:#FFFFFF;text-decoration:none;font-size:14px;font-weight:700;'
         'font-family:\'Segoe UI\',Arial,sans-serif;padding:12px 28px;border-radius:8px;'
         'letter-spacing:0.3px;">'
-        'Access Insight Hub&nbsp;|&nbsp;Tr&#7909;y c&#7853;p C&#7893;ng th&#244;ng tin s&#7921; ki&#7879;n'
+        'Access Insight Hub&nbsp;|&nbsp;Truy c&#7853;p C&#7893;ng th&#244;ng tin s&#7921; ki&#7879;n'
         '</a>'
         '</td></tr>'
         '</table>'
@@ -265,6 +275,84 @@ async def send_email_with_qr(request: EmailRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi khi xử lý: {str(e)}")
 
+# ─── Bulk Email with QR ───────────────────────────────────────────────────────
+
+class BulkEmailRecipient(BaseModel):
+    email: str
+    content_qr: str
+    full_name: Optional[str] = None
+
+class BulkEmailRequest(BaseModel):
+    from_email: Optional[str] = None  # defaults to noreply@{MAILGUN_DOMAIN}
+    sender_name: Optional[str] = "Nexpo"
+    subject: str
+    html: str
+    recipients: List[BulkEmailRecipient]
+
+class BulkEmailResponse(BaseModel):
+    sent: int
+    failed: int
+    errors: List[str]
+
+@app.post("/send-bulk-email-with-qr", response_model=BulkEmailResponse)
+async def send_bulk_email_with_qr(request: BulkEmailRequest):
+    """
+    Gửi email kèm QR code cho nhiều người dùng.
+    Thay {{name}} trong HTML bằng full_name của từng người.
+    """
+    if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
+        raise HTTPException(status_code=500, detail="Mailgun chưa được cấu hình")
+
+    # Build from_email using MAILGUN_DOMAIN (the verified sending domain)
+    sender_name = request.sender_name or "Nexpo"
+    from_email = request.from_email or f"{sender_name} <noreply@{MAILGUN_DOMAIN}>"
+
+    sent = 0
+    failed = 0
+    errors: List[str] = []
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for recipient in request.recipients:
+            if not recipient.email or not recipient.content_qr:
+                failed += 1
+                errors.append(f"Invalid recipient: missing email or content_qr")
+                continue
+
+            try:
+                # Personalize HTML
+                personalized_html = request.html.replace("{{name}}", recipient.full_name or "")
+                personalized_html = personalized_html.replace("{{full_name}}", recipient.full_name or "")
+
+                # Append QR image and inject extras
+                html_with_qr = append_qr_cid_to_html(personalized_html)
+                html_with_qr = inject_qr_extras(html_with_qr, recipient.content_qr)
+
+                qr_bytes = generate_qr_code_bytes(recipient.content_qr)
+
+                mg_response = await client.post(
+                    f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
+                    auth=("api", MAILGUN_API_KEY),
+                    data={
+                        "from": from_email,
+                        "to": recipient.email,
+                        "subject": request.subject,
+                        "html": html_with_qr,
+                    },
+                    files=[("inline", ("qrcode.png", qr_bytes, "image/png"))],
+                )
+
+                if not mg_response.is_success:
+                    err_text = mg_response.text[:200]
+                    failed += 1
+                    errors.append(f"{recipient.email}: Mailgun {mg_response.status_code} - {err_text}")
+                else:
+                    sent += 1
+            except Exception as e:
+                failed += 1
+                errors.append(f"{recipient.email}: {str(e)[:150]}")
+
+    return BulkEmailResponse(sent=sent, failed=failed, errors=errors)
+
 # ─── Job Matching Engine ──────────────────────────────────────────────────────
 
 DIRECTUS_URL = os.getenv("DIRECTUS_URL", "https://app.nexpo.vn")
@@ -275,6 +363,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 class MatchRunRequest(BaseModel):
     event_id: int
     job_requirement_id: Optional[str] = None  # None = match all jobs in event
+    exhibitor_id: Optional[str] = None
 
 
 class MatchSuggestion(BaseModel):
@@ -428,6 +517,27 @@ def _simple_score_match(job: dict, visitor_profile: dict) -> dict:
     }
 
 
+def _keyword_prefilter_score(job: dict, profile: dict) -> float:
+    """Fast keyword overlap check before calling AI. Returns 0.0-1.0."""
+    job_text = " ".join(filter(None, [
+        str(job.get("job_title") or ""),
+        str(job.get("description") or ""),
+        str(job.get("skills") or ""),
+        str(job.get("requirements") or ""),
+        str(job.get("employment_type") or ""),
+        str(job.get("experience_level") or ""),
+    ])).lower()
+    candidate_text = " ".join(str(v) for v in profile.values() if v).lower()
+    if not job_text or not candidate_text:
+        return 0.0
+    job_words = set(job_text.split())
+    candidate_words = set(candidate_text.split())
+    if not job_words:
+        return 0.0
+    overlap = job_words & candidate_words
+    return len(overlap) / len(job_words)
+
+
 async def extract_visitor_profile(submission: dict, matching_fields: List[dict]) -> dict:
     """Extract visitor profile from form submission answers."""
     profile = {}
@@ -467,9 +577,12 @@ async def run_job_matching(request: MatchRunRequest):
 
     try:
         # 1. Fetch job requirements for this event
-        job_filter = f"filter[event_id][_eq]={event_id}&filter[status][_eq]=published"
         if request.job_requirement_id:
             job_filter = f"filter[id][_eq]={request.job_requirement_id}"
+        elif request.exhibitor_id:
+            job_filter = f"filter[event_id][_eq]={event_id}&filter[status][_eq]=published&filter[exhibitor_id][_eq]={request.exhibitor_id}"
+        else:
+            job_filter = f"filter[event_id][_eq]={event_id}&filter[status][_eq]=published"
 
         jobs_resp = await directus_get(
             f"/items/job_requirements?{job_filter}"
@@ -570,33 +683,59 @@ async def run_job_matching(request: MatchRunRequest):
         if not submissions:
             return MatchRunResponse(success=True, message="No visitor profiles found for matching", suggestions_created=0)
 
-        # 4. Score each job × visitor pair and create suggestions
+        # Pre-load all existing suggestions for this event into memory (avoid N+1 queries)
+        existing_resp = await directus_get(
+            f"/items/job_match_suggestions?filter[event_id][_eq]={event_id}"
+            "&fields[]=id,job_requirement_id,registration_id,status&limit=2000"
+        )
+        # Map: (job_requirement_id, registration_id) → {id, status}
+        existing_map: dict = {}
+        for s in existing_resp.get("data", []):
+            key = (str(s.get("job_requirement_id", "")), str(s.get("registration_id", "")))
+            existing_map[key] = {"id": s["id"], "status": s.get("status", "pending")}
+
+        # Score each job × visitor pair and create/update suggestions
         suggestions_created = 0
+        suggestions_updated = 0
         all_suggestions: List[MatchSuggestion] = []
-        SCORE_THRESHOLD = 0.2  # Only save suggestions above this score
+        SCORE_THRESHOLD = 0.5       # Only save suggestions scoring ≥ 50%
+        KEYWORD_THRESHOLD = 0.15    # Require 15% word overlap before calling AI (was 0.05)
+        MAX_CANDIDATES_PER_JOB = 40 # Cap AI calls per job to top-N by keyword score
 
         for job in jobs:
             exhibitor_id = job.get("exhibitor_id")
+
+            # Pre-filter all candidates by keyword score, keep only top MAX_CANDIDATES_PER_JOB
+            scored_submissions = []
             for submission in submissions:
                 registration_id = submission.get("registration_id")
                 if not registration_id:
                     continue
-
-                # Use pre-merged profile if available, otherwise extract from answers
                 visitor_profile = submission.get("_merged_profile") or await extract_visitor_profile(submission, matching_fields)
                 if not visitor_profile:
                     continue
+                kw_score = _keyword_prefilter_score(job, visitor_profile)
+                if kw_score >= KEYWORD_THRESHOLD:
+                    scored_submissions.append((kw_score, submission, visitor_profile))
 
-                # Score with Gemini
+            # Sort by keyword score descending, cap at MAX_CANDIDATES_PER_JOB
+            scored_submissions.sort(key=lambda x: x[0], reverse=True)
+            top_submissions = scored_submissions[:MAX_CANDIDATES_PER_JOB]
+
+            for kw_score, submission, visitor_profile in top_submissions:
+                registration_id = submission.get("registration_id")
+
+                # Score with AI
                 score_result = await score_match_with_gemini(job, visitor_profile)
                 score = score_result["score"]
 
                 if score < SCORE_THRESHOLD:
                     continue
 
+                reg_id_str = str(registration_id) if isinstance(registration_id, (str, int)) else str(registration_id.get("id", ""))
                 suggestion = MatchSuggestion(
                     job_requirement_id=str(job["id"]),
-                    registration_id=str(registration_id) if isinstance(registration_id, (str, int)) else str(registration_id.get("id", "")),
+                    registration_id=reg_id_str,
                     exhibitor_id=str(exhibitor_id) if exhibitor_id else "",
                     score=score,
                     matched_criteria=score_result["matched_criteria"],
@@ -604,15 +743,8 @@ async def run_job_matching(request: MatchRunRequest):
                 )
                 all_suggestions.append(suggestion)
 
-                # Check if suggestion already exists
-                existing_resp = await directus_get(
-                    f"/items/job_match_suggestions"
-                    f"?filter[event_id][_eq]={event_id}"
-                    f"&filter[job_requirement_id][_eq]={job['id']}"
-                    f"&filter[registration_id][_eq]={suggestion.registration_id}"
-                    "&fields[]=id&limit=1"
-                )
-                existing = existing_resp.get("data", [])
+                key = (suggestion.job_requirement_id, suggestion.registration_id)
+                existing = existing_map.get(key)
 
                 suggestion_data = {
                     "event_id": event_id,
@@ -622,22 +754,26 @@ async def run_job_matching(request: MatchRunRequest):
                     "score": round(score, 4),
                     "matched_criteria": suggestion.matched_criteria,
                     "ai_reasoning": suggestion.ai_reasoning,
-                    "status": "pending",
                 }
 
                 if existing:
-                    # Update existing suggestion score
+                    # Never touch approved/rejected suggestions — only refresh pending ones
+                    if existing["status"] != "pending":
+                        continue
                     await directus_patch(
-                        f"/items/job_match_suggestions/{existing[0]['id']}",
+                        f"/items/job_match_suggestions/{existing['id']}",
                         suggestion_data,
                     )
+                    suggestions_updated += 1
                 else:
-                    await directus_post("/items/job_match_suggestions", suggestion_data)
+                    await directus_post("/items/job_match_suggestions", {**suggestion_data, "status": "pending"})
                     suggestions_created += 1
 
+        total_candidates = len(submissions)
         return MatchRunResponse(
             success=True,
-            message=f"Matching complete. {suggestions_created} new suggestions created.",
+            message=f"Matching complete. {suggestions_created} new, {suggestions_updated} refreshed. "
+                    f"Checked {len(jobs)} job(s) × top-{MAX_CANDIDATES_PER_JOB} of {total_candidates} candidates (keyword threshold {int(KEYWORD_THRESHOLD*100)}%).",
             suggestions_created=suggestions_created,
             suggestions=all_suggestions,
         )
