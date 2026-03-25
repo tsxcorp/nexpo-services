@@ -1,7 +1,7 @@
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import MeetingNotificationRequest
-from app.config import DIRECTUS_ADMIN_TOKEN, MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_API_URL, PORTAL_URL
+from app.config import DIRECTUS_ADMIN_TOKEN, MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_API_URL, PORTAL_URL, ADMIN_URL
 from app.services.directus import directus_get, create_notification, resolve_visitor_email, resolve_exhibitor_email
 from app.services.mailgun import send_mailgun, meeting_notification_html
 import httpx
@@ -90,6 +90,25 @@ async def send_meeting_notification(request: MeetingNotificationRequest):
                         entity_id=request.meeting_id,
                     )
                     in_app_created.append(f"exhibitor:{user_id}")
+            except Exception:
+                pass
+
+            # Also notify the event organizer with an admin link
+            try:
+                admin_matching_url = f"{ADMIN_URL}/events/{event_id}/talent-matching/requests" if tab == "hiring" else f"{ADMIN_URL}/events/{event_id}/business-matching/requests"
+                event_resp = await directus_get(f"/items/events/{event_id}?fields[]=user_created")
+                organizer_user_id = (event_resp.get("data") or {}).get("user_created")
+                if organizer_user_id:
+                    await create_notification(
+                        user_id=organizer_user_id,
+                        title="Yêu cầu gặp mặt mới",
+                        body=f"{visitor_name or 'Ứng viên'} — {company_name or 'Exhibitor'}" + (f" · {time_str}" if time_str else ""),
+                        link=admin_matching_url,
+                        notif_type="meeting_scheduled",
+                        entity_type="meeting",
+                        entity_id=request.meeting_id,
+                    )
+                    in_app_created.append(f"organizer:{organizer_user_id}")
             except Exception:
                 pass
 
