@@ -118,7 +118,8 @@ class GenerateEmailTemplateRequest(BaseModel):
     language: str = "bilingual"
     tone: str = "professional"
     fields: List[EmailTemplateField] = []
-    email_style: Optional[EmailStyleConfig] = None  # event brand settings
+    email_style: Optional[EmailStyleConfig] = None
+    custom_instructions: Optional[str] = None  # Extra user-defined instructions for AI generation
 
 class GenerateEmailTemplateResponse(BaseModel):
     html: str

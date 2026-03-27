@@ -1,7 +1,9 @@
 """Mailgun email delivery helpers."""
 import httpx
 from typing import Optional
-from app.config import MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_API_URL
+from app.config import MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_API_URL, ADMIN_URL
+
+NEXPO_LOGO_URL = f"{ADMIN_URL}/nexpo-logo-light.png"
 
 
 async def send_mailgun(
@@ -62,7 +64,7 @@ def meeting_notification_html(
     return f"""
 <div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;background:#fff;">
   <div style="margin-bottom:24px;">
-    <img src="https://app.nexpo.vn/assets/logo.png" alt="Nexpo" style="height:32px;" onerror="this.style.display='none'"/>
+    <img src="{NEXPO_LOGO_URL}" alt="Nexpo" style="height:32px;" onerror="this.style.display='none'"/>
   </div>
   <h2 style="font-size:20px;font-weight:700;color:#111827;margin:0 0 16px;">{title}</h2>
   {body_html}

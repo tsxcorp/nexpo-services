@@ -4,10 +4,11 @@ Called by POST /notify (unified) and legacy POST /meeting-notification.
 All handlers are fire-tolerant: they never crash the caller over partial failures.
 """
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from app.config import MAILGUN_DOMAIN, ADMIN_URL, PORTAL_URL
 from app.services.directus import (
     directus_get,
+    directus_patch,
     create_notification,
     resolve_visitor_email,
     resolve_exhibitor_email,
@@ -16,34 +17,82 @@ from app.services.mailgun import send_mailgun, meeting_notification_html
 from app.services.ics_service import generate_meeting_ics
 
 
+# ── Notification log helper ───────────────────────────────────────────────────
+
+async def append_meeting_notification_log(meeting_id: str, entries: list[dict]) -> None:
+    """
+    Append notification log entries to the meeting record.
+    Each entry: { timestamp, trigger, channel, recipient_type, recipient, status, subject? }
+    """
+    if not entries:
+        return
+    try:
+        # Fetch existing log
+        resp = await directus_get(f"/items/meetings/{meeting_id}?fields[]=notification_log")
+        existing = (resp.get("data") or {}).get("notification_log") or []
+        if not isinstance(existing, list):
+            existing = []
+
+        # Append new entries
+        updated_log = existing + entries
+
+        # Save back
+        await directus_patch(f"/items/meetings/{meeting_id}", {"notification_log": updated_log})
+    except Exception:
+        pass  # Never crash over logging
+
+
 # ── Meeting email template helpers ────────────────────────────────────────────
 
-async def _get_meeting_template(event_id: str, trigger_recipient: str) -> dict | None:
+async def _get_meeting_template(event_id: str, trigger_recipient: str, matching_type: str = "talent_matching") -> dict | None:
     """
-    Fetch organizer-configured email template for (event_id, trigger_recipient).
+    Fetch organizer-configured email template for (event_id, trigger_recipient, matching_type).
+    Falls back to null matching_type (legacy) if no typed template found.
     Returns dict with 'subject' and 'html_template' keys, or None if not found.
     """
     try:
+        # Try explicit matching_type first
         resp = await directus_get(
             f"/items/meeting_email_templates"
             f"?filter[event_id][_eq]={event_id}"
             f"&filter[trigger_recipient][_eq]={trigger_recipient}"
+            f"&filter[matching_type][_eq]={matching_type}"
             f"&fields[]=subject,html_template&limit=1"
         )
         items = resp.get("data") or []
         if items and items[0].get("html_template"):
             return items[0]
+        # Fallback: legacy null matching_type (only for talent_matching)
+        if matching_type == "talent_matching":
+            resp2 = await directus_get(
+                f"/items/meeting_email_templates"
+                f"?filter[event_id][_eq]={event_id}"
+                f"&filter[trigger_recipient][_eq]={trigger_recipient}"
+                f"&filter[matching_type][_null]=true"
+                f"&fields[]=subject,html_template&limit=1"
+            )
+            items2 = resp2.get("data") or []
+            if items2 and items2[0].get("html_template"):
+                return items2[0]
     except Exception:
         pass
     return None
 
 
 def _substitute(template: str, vars: dict) -> str:
-    """Replace {{variable_name}} placeholders with values from vars dict."""
+    """Replace {{variable_name}} and ${variable_name} placeholders with values from vars dict.
+
+    Supports both syntaxes:
+     - {{company_name}}  → standard (used by new AI-generated and manual templates)
+     - ${company_name}   → legacy (old AI-generated templates before the prompt fix)
+    """
     def replacer(match: re.Match) -> str:
         key = match.group(1).strip()
         return str(vars.get(key, match.group(0)))
-    return re.sub(r"\{\{([^}]+)\}\}", replacer, template)
+
+    result = re.sub(r"\{\{([^}]+)\}\}", replacer, template)   # {{var}} — primary
+    result = re.sub(r"\$\{([^}]+)\}", replacer, result)        # ${var}  — legacy fallback
+    return result
 
 
 # ── Meetings ──────────────────────────────────────────────────────────────────
@@ -70,6 +119,7 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
     registration_id = str(meeting.get("registration_id", ""))
     exhibitor_id = str(meeting.get("exhibitor_id", ""))
     meeting_category = meeting.get("meeting_category") or "talent"
+    matching_type = "business_matching" if meeting_category == "business" else "talent_matching"
     job_title = (meeting.get("job_requirement_id") or {}).get("job_title") or "vị trí này / this position"
 
     tab = "hiring" if meeting_category == "talent" else "business"
@@ -93,6 +143,27 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
 
     emails_sent: list[str] = []
     in_app_created: list[str] = []
+    notification_log: list[dict] = []  # Will be saved to meeting record
+
+    def _log_entry(
+        channel: str,
+        recipient_type: str,
+        recipient: str,
+        status: str,
+        subject: str = None,
+    ) -> dict:
+        """Build a notification log entry."""
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trigger": trigger,
+            "channel": channel,
+            "recipient_type": recipient_type,
+            "recipient": recipient,
+            "status": status,
+        }
+        if subject:
+            entry["subject"] = subject
+        return entry
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -131,6 +202,12 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
                     notif_type=notif_type, entity_type="meeting", entity_id=meeting_id,
                 )
                 in_app_created.append(f"exhibitor:{user_id}")
+                notification_log.append(_log_entry(
+                    channel="in_app",
+                    recipient_type="exhibitor",
+                    recipient=user_id,
+                    status="sent",
+                ))
         except Exception:
             pass
 
@@ -144,6 +221,12 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
                     notif_type=notif_type, entity_type="meeting", entity_id=meeting_id,
                 )
                 in_app_created.append(f"organizer:{organizer_id}")
+                notification_log.append(_log_entry(
+                    channel="in_app",
+                    recipient_type="organizer",
+                    recipient=organizer_id,
+                    status="sent",
+                ))
         except Exception:
             pass
 
@@ -161,7 +244,7 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
     # ── SCHEDULED ─────────────────────────────────────────────────────────────
     if trigger == "scheduled":
         if exhibitor_email:
-            tmpl = await _get_meeting_template(event_id, "scheduled_exhibitor")
+            tmpl = await _get_meeting_template(event_id, "scheduled_exhibitor", matching_type)
             if tmpl:
                 subject = _substitute(tmpl.get("subject") or "", tmpl_vars) or \
                     f"[Nexpo] Yêu cầu gặp mặt mới / New meeting request — {visitor_name or 'Ứng viên / Candidate'}"
@@ -186,10 +269,18 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
                     cta_label="Xem cuộc họp / View Meeting", cta_url=portal_url,
                 )
             ics = _ics_attachment("REQUEST", [exhibitor_email], sequence=0)
-            if await send_mailgun(exhibitor_email, subject, html,
-                                  from_email=f"Nexpo <noreply@{MAILGUN_DOMAIN}>",
-                                  attachments=ics):
+            email_sent = await send_mailgun(exhibitor_email, subject, html,
+                                            from_email=f"Nexpo <noreply@{MAILGUN_DOMAIN}>",
+                                            attachments=ics)
+            if email_sent:
                 emails_sent.append(f"exhibitor:{exhibitor_email}")
+            notification_log.append(_log_entry(
+                channel="email",
+                recipient_type="exhibitor",
+                recipient=exhibitor_email,
+                status="sent" if email_sent else "failed",
+                subject=subject,
+            ))
 
         candidate_summary = f"{visitor_name or 'Ứng viên'} — {job_title}" + (f" · {time_str}" if time_str else "")
         await _notify_exhibitor_user(
@@ -207,7 +298,7 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
     # ── CONFIRMED ─────────────────────────────────────────────────────────────
     elif trigger == "confirmed":
         if visitor_email:
-            tmpl = await _get_meeting_template(event_id, "confirmed_visitor")
+            tmpl = await _get_meeting_template(event_id, "confirmed_visitor", matching_type)
             if tmpl:
                 subject = _substitute(tmpl.get("subject") or "", tmpl_vars) or \
                     f"[Nexpo] Cuộc họp đã được xác nhận / Meeting confirmed — {company_name or 'Exhibitor'}"
@@ -229,15 +320,23 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
                 )
                 html = meeting_notification_html("Cuộc họp đã được xác nhận! / Meeting Confirmed!", body_lines)
             ics = _ics_attachment("REQUEST", [visitor_email], sequence=1)
-            if await send_mailgun(visitor_email, subject, html,
-                                  from_email=f"Nexpo <noreply@{MAILGUN_DOMAIN}>",
-                                  attachments=ics):
+            email_sent = await send_mailgun(visitor_email, subject, html,
+                                            from_email=f"Nexpo <noreply@{MAILGUN_DOMAIN}>",
+                                            attachments=ics)
+            if email_sent:
                 emails_sent.append(f"visitor:{visitor_email}")
+            notification_log.append(_log_entry(
+                channel="email",
+                recipient_type="visitor",
+                recipient=visitor_email,
+                status="sent" if email_sent else "failed",
+                subject=subject,
+            ))
 
         await _notify_exhibitor_user(
             title="Bạn đã xác nhận cuộc họp",
             body=f"{visitor_name or 'Ứng viên'} — {job_title}" + (f" · {time_str}" if time_str else ""),
-            link=portal_url,
+            link=admin_link,  # admin_link so clicking in admin/portal navigates to meeting detail
             notif_type="meeting_confirmed",
         )
         await _notify_organizer(
@@ -252,7 +351,7 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
             if not email:
                 continue
             tr_key = f"cancelled_{recipient_type}"
-            tmpl = await _get_meeting_template(event_id, tr_key)
+            tmpl = await _get_meeting_template(event_id, tr_key, matching_type)
             if tmpl:
                 subject = _substitute(tmpl.get("subject") or "", tmpl_vars) or \
                     f"[Nexpo] Cuộc họp đã bị hủy / Meeting cancelled — {job_title}"
@@ -274,10 +373,18 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
                     ]
                 html = meeting_notification_html("Cuộc họp đã bị hủy / Meeting Cancelled", body_lines)
             ics = _ics_attachment("CANCEL", [email], sequence=2)
-            if await send_mailgun(email, subject, html,
-                                  from_email=f"Nexpo <noreply@{MAILGUN_DOMAIN}>",
-                                  attachments=ics):
+            email_sent = await send_mailgun(email, subject, html,
+                                            from_email=f"Nexpo <noreply@{MAILGUN_DOMAIN}>",
+                                            attachments=ics)
+            if email_sent:
                 emails_sent.append(f"{recipient_type}:{email}")
+            notification_log.append(_log_entry(
+                channel="email",
+                recipient_type=recipient_type,
+                recipient=email,
+                status="sent" if email_sent else "failed",
+                subject=subject,
+            ))
 
         await _notify_exhibitor_user(
             title="Cuộc họp đã bị hủy",
@@ -290,6 +397,9 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
             body=f"{company_name or 'Exhibitor'} — {visitor_name or 'Ứng viên'}" + (f" · {time_str}" if time_str else ""),
             notif_type="meeting_cancelled",
         )
+
+    # ── Persist notification log to meeting record ────────────────────────────
+    await append_meeting_notification_log(meeting_id, notification_log)
 
     return {"emails_sent": emails_sent, "in_app_created": in_app_created}
 

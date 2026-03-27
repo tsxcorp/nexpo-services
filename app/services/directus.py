@@ -108,7 +108,8 @@ async def resolve_visitor_email(registration_id: str) -> tuple[str, str]:
 
 
 async def resolve_exhibitor_email(exhibitor_id: str, event_id: str) -> tuple[str, str]:
-    """Returns (email, company_name). Uses exhibitor_events.representative_email first."""
+    """Returns (email, company_name). Uses exhibitor_events.representative_email first,
+    falls back to exhibitors table directly if no exhibitor_events record found."""
     try:
         ee_resp = await directus_get(
             f"/items/exhibitor_events"
@@ -120,22 +121,39 @@ async def resolve_exhibitor_email(exhibitor_id: str, event_id: str) -> tuple[str
             "&limit=1"
         )
         items = ee_resp.get("data", [])
-        if not items:
-            return "", ""
-        ee = items[0]
-        ex = ee.get("exhibitor_id") or {}
 
+        if items:
+            ee = items[0]
+            ex = ee.get("exhibitor_id") or {}
+            email = (
+                ee.get("representative_email")
+                or ex.get("representative_email")
+                or (ex.get("user_id") or {}).get("email")
+                or ""
+            )
+            translations = ex.get("translations") or []
+            t = next((t for t in translations if t.get("languages_code") == "vi-VN"), None) or (translations[0] if translations else {})
+            company_name = t.get("company_name") or ee.get("nameboard") or ""
+            return email, company_name
+
+        # ── Fallback: query exhibitors table directly ──────────────────────────
+        # This handles exhibitors that exist but have no exhibitor_events record yet
+        ex_resp = await directus_get(
+            f"/items/exhibitors/{exhibitor_id}"
+            "?fields[]=representative_email,user_id.email,"
+            "translations.company_name,translations.languages_code"
+        )
+        ex = ex_resp.get("data") or {}
         email = (
-            ee.get("representative_email")
-            or ex.get("representative_email")
+            ex.get("representative_email")
             or (ex.get("user_id") or {}).get("email")
             or ""
         )
-
         translations = ex.get("translations") or []
         t = next((t for t in translations if t.get("languages_code") == "vi-VN"), None) or (translations[0] if translations else {})
-        company_name = t.get("company_name") or ee.get("nameboard") or ""
-
+        company_name = t.get("company_name") or ""
         return email, company_name
+
     except Exception:
         return "", ""
+
