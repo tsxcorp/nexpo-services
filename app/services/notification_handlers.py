@@ -4,7 +4,7 @@ Called by POST /notify (unified) and legacy POST /meeting-notification.
 All handlers are fire-tolerant: they never crash the caller over partial failures.
 """
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from app.config import MAILGUN_DOMAIN, ADMIN_URL, PORTAL_URL
 from app.services.directus import (
     directus_get,
@@ -127,12 +127,27 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
     admin_link = f"{ADMIN_URL}/events/{event_id}/meetings?open={meeting_id}"
 
     scheduled_at = meeting.get("scheduled_at")
+    # Directus `dateTime` fields are stored as naive local time (Vietnam UTC+7).
+    # We must attach the correct timezone before converting to UTC for ICS.
+    VN_TZ = timezone(timedelta(hours=7))
+
+    def _parse_scheduled_at(raw: str) -> datetime | None:
+        """Parse Directus naive dateTime as Vietnam local time (UTC+7)."""
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", ""))  # strip Z if present
+            if dt.tzinfo is None:  # naive → treat as UTC+7
+                dt = dt.replace(tzinfo=VN_TZ)
+            return dt
+        except Exception:
+            return None
+
     time_str = ""
     if scheduled_at:
-        try:
-            dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
-            time_str = dt.strftime("%d/%m/%Y %H:%M")
-        except Exception:
+        dt_parsed = _parse_scheduled_at(scheduled_at)
+        if dt_parsed:
+            # Display in Vietnam local time
+            time_str = dt_parsed.astimezone(VN_TZ).strftime("%d/%m/%Y %H:%M")
+        else:
             time_str = scheduled_at
     location_str = meeting.get("location") or ""
 
@@ -172,7 +187,9 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
         if not scheduled_at:
             return None
         try:
-            dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+            dt = _parse_scheduled_at(scheduled_at)  # timezone-aware UTC+7
+            if dt is None:
+                return None
             summary = f"Gặp mặt: {visitor_name or 'Ứng viên'} — {company_name or 'Exhibitor'}"
             description = f"Vị trí: {job_title}\nThời gian: {time_str}\nĐịa điểm: {location_str}"
             ics_bytes = generate_meeting_ics(
@@ -336,7 +353,7 @@ async def handle_meeting(meeting_id: str, trigger: str, event_name: str | None =
         await _notify_exhibitor_user(
             title="Bạn đã xác nhận cuộc họp",
             body=f"{visitor_name or 'Ứng viên'} — {job_title}" + (f" · {time_str}" if time_str else ""),
-            link=admin_link,  # admin_link so clicking in admin/portal navigates to meeting detail
+            link=portal_url,  # Exhibitors are portal users — link to portal meetings page
             notif_type="meeting_confirmed",
         )
         await _notify_organizer(
