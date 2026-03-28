@@ -62,6 +62,23 @@ class NotifyRequest(BaseModel):
     context: dict    # type-specific fields — see routers/notify.py for per-type docs
 
 
+class BulkNotifyRequest(BaseModel):
+    type: str              # e.g. "registration.qr_email", "meeting.confirmed"
+    ids: List[str]         # list of IDs to process (registration_id, meeting_id, etc.)
+    context: dict = {}     # optional extra context (event_id, trigger, etc.)
+
+class BulkNotifyItemResult(BaseModel):
+    id: str
+    status: str            # "ok" | "error"
+    email: Optional[str] = None
+    error: Optional[str] = None
+
+class BulkNotifyResponse(BaseModel):
+    results: List[BulkNotifyItemResult]
+    sent: int
+    failed: int
+
+
 # ── Meeting Notifications (legacy) ────────────────────────────────────────────
 
 class MeetingNotificationRequest(BaseModel):
