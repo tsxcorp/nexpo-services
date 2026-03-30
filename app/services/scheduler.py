@@ -4,11 +4,10 @@ Import `scheduler` and call scheduler.start() / scheduler.shutdown() from lifesp
 """
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import DIRECTUS_ADMIN_TOKEN, MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_API_URL, PORTAL_URL
-from app.services.directus import directus_get, directus_patch
+from app.config import DIRECTUS_ADMIN_TOKEN, PORTAL_URL
+from app.services.directus import directus_get, directus_patch, directus_delete
 from app.services.directus import resolve_visitor_email, resolve_exhibitor_email
 from app.services.mailgun import send_mailgun, meeting_notification_html
-import httpx
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,22 +17,22 @@ scheduler = AsyncIOScheduler()
 async def expire_pending_orders() -> None:
     """
     APScheduler job — runs every 5 minutes.
-    Finds ticket_orders that have been in 'pending' status for > 30 minutes.
-    Marks them as 'cancelled' and rolls back quantity_sold on ticket_classes.
+    Finds ticket_orders with status=pending whose expires_at has passed.
+    Rolls back quantity_sold, cleans up issued_tickets + stub registrations,
+    marks order as expired, and emails buyer.
     """
     if not DIRECTUS_ADMIN_TOKEN:
         return
 
-    now = datetime.now(timezone.utc)
-    expire_before = (now - timedelta(minutes=30)).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     try:
         resp = await directus_get(
             "/items/ticket_orders"
             "?filter[status][_eq]=pending"
-            f"&filter[date_created][_lt]={expire_before}"
-            "&fields[]=id,ticket_class_id,quantity"
-            "&limit=100"
+            f"&filter[expires_at][_lt]={now}"
+            "&fields[]=id,buyer_email,buyer_name"
+            "&limit=50"
         )
         orders = resp.get("data", [])
     except Exception as exc:
@@ -42,30 +41,84 @@ async def expire_pending_orders() -> None:
 
     for order in orders:
         order_id = order.get("id")
-        ticket_class_id = order.get("ticket_class_id")
-        quantity = int(order.get("quantity") or 1)
-
         try:
-            # Mark order as cancelled
-            await directus_patch(f"/items/ticket_orders/{order_id}", {"status": "cancelled"})
-            logger.info("[expire_orders] Cancelled order %s", order_id)
+            await _expire_single_order(order)
         except Exception as exc:
-            logger.error("[expire_orders] Failed to cancel order %s: %s", order_id, exc)
-            continue
+            logger.error("[expire_orders] Failed to expire order %s: %s", order_id, exc)
 
-        if ticket_class_id:
-            try:
-                # Rollback: decrement quantity_sold
-                tc_resp = await directus_get(f"/items/ticket_classes/{ticket_class_id}?fields[]=quantity_sold")
-                current_sold = int((tc_resp.get("data") or {}).get("quantity_sold") or 0)
-                new_sold = max(0, current_sold - quantity)
-                await directus_patch(
-                    f"/items/ticket_classes/{ticket_class_id}",
-                    {"quantity_sold": new_sold},
-                )
-                logger.info("[expire_orders] Rolled back qty_sold for class %s (%d → %d)", ticket_class_id, current_sold, new_sold)
-            except Exception as exc:
-                logger.error("[expire_orders] Failed to rollback inventory for %s: %s", ticket_class_id, exc)
+
+async def _expire_single_order(order: dict) -> None:
+    """Expire one pending order: rollback inventory, cleanup records, notify buyer."""
+    order_id = order["id"]
+
+    # 1. Fetch order items for quantity rollback
+    items_resp = await directus_get(
+        f"/items/ticket_order_items"
+        f"?filter[order_id][_eq]={order_id}"
+        "&fields[]=ticket_class_id,quantity"
+        "&limit=50"
+    )
+    items = items_resp.get("data", [])
+
+    # 2. Rollback quantity_sold per ticket_class
+    for item in items:
+        tc_id = item.get("ticket_class_id")
+        qty = int(item.get("quantity") or 0)
+        if not tc_id or qty <= 0:
+            continue
+        try:
+            tc_resp = await directus_get(f"/items/ticket_classes/{tc_id}?fields[]=quantity_sold")
+            current_sold = int((tc_resp.get("data") or {}).get("quantity_sold") or 0)
+            await directus_patch(f"/items/ticket_classes/{tc_id}", {"quantity_sold": max(0, current_sold - qty)})
+        except Exception as exc:
+            logger.error("[expire_orders] Rollback failed for class %s: %s", tc_id, exc)
+
+    # 3. Fetch issued_tickets to cleanup stubs
+    tickets_resp = await directus_get(
+        f"/items/issued_tickets"
+        f"?filter[order_id][_eq]={order_id}"
+        "&fields[]=id,registration_id"
+        "&limit=200"
+    )
+    tickets = tickets_resp.get("data", [])
+
+    # 4. Delete stub registrations (only is_stub=true)
+    reg_ids = [t["registration_id"] for t in tickets if t.get("registration_id")]
+    for reg_id in reg_ids:
+        try:
+            await directus_delete(f"/items/registrations/{reg_id}")
+        except Exception:
+            pass  # may already be deleted or not a stub
+
+    # 5. Delete issued_tickets
+    for t in tickets:
+        try:
+            await directus_delete(f"/items/issued_tickets/{t['id']}")
+        except Exception:
+            pass
+
+    # 6. Mark order expired
+    await directus_patch(f"/items/ticket_orders/{order_id}", {"status": "expired"})
+    logger.info("[expire_orders] Expired order %s, cleaned %d tickets", order_id, len(tickets))
+
+    # 7. Notify buyer (fire-and-forget)
+    buyer_email = order.get("buyer_email")
+    if buyer_email:
+        try:
+            await send_mailgun(
+                buyer_email,
+                "Đơn đặt vé đã hết hạn / Ticket order expired",
+                "<div style='font-family:Inter,sans-serif;max-width:600px;margin:auto;padding:32px'>"
+                "<h2 style='color:#06043E'>Đơn đặt vé đã hết hạn</h2>"
+                f"<p>Xin chào <strong>{order.get('buyer_name', '')}</strong>,</p>"
+                "<p>Đơn đặt vé của bạn đã hết hạn do chưa thanh toán trong thời gian quy định. "
+                "Vui lòng thực hiện lại nếu bạn vẫn muốn tham dự sự kiện.</p>"
+                "<p style='color:#888;font-size:14px'>Your ticket order has expired due to incomplete payment. "
+                "Please try again if you still wish to attend.</p>"
+                "</div>",
+            )
+        except Exception:
+            pass
 
 
 

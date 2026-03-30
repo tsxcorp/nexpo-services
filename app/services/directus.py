@@ -49,6 +49,16 @@ async def directus_patch(path: str, data: dict) -> dict:
         return resp.json()
 
 
+async def directus_delete(path: str) -> None:
+    """DELETE from Directus using admin token."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.delete(
+            f"{DIRECTUS_URL}{path}",
+            headers={"Authorization": f"Bearer {DIRECTUS_ADMIN_TOKEN}"},
+        )
+        resp.raise_for_status()
+
+
 # ── Notifications ─────────────────────────────────────────────────────────────
 
 async def create_notification(
