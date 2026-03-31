@@ -8,7 +8,13 @@ POST /notify/bulk
   { "type": "<notification_type>", "ids": ["id1", "id2", ...], "context": {...} }
   Processes up to 50 items of the same type, returns per-item results.
 
+POST /notify/test
+  { "channel": "email"|"sms"|"zns", "event_id": int, "tenant_id": int,
+    "recipient": {"email": "...", "phone": "..."} }
+  Sends a test notification via the specified channel.
+
 All notification logic lives in app/services/notification_handlers.py.
+Multi-channel dispatch: app/services/notification_dispatcher.py (new).
 
 Supported types:
   meeting.scheduled       context: { meeting_id }
@@ -25,6 +31,7 @@ Supported types:
                           Sends consolidated interview schedule email to candidates
 """
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from app.models.schemas import NotifyRequest, BulkNotifyRequest, BulkNotifyResponse, BulkNotifyItemResult
 from app.services.notification_handlers import (
     handle_meeting,
@@ -34,6 +41,11 @@ from app.services.notification_handlers import (
     handle_lead_captured,
     handle_candidate_interview_schedule,
 )
+from app.services.handlers.match_request_handler import handle_match_request
+from app.services.notification_dispatcher import dispatch_multi_channel
+from app.services.notification_config import get_channel_config
+from app.services.channels.base_channel import NotificationRecipient
+from app.services.channels.channel_factory import build_channel
 
 router = APIRouter()
 
@@ -90,6 +102,17 @@ async def _dispatch(notify_type: str, item_id: str | None, context: dict) -> dic
             attendee_email=str(context.get("attendee_email", "")),
             attendee_company=str(context.get("attendee_company", "")),
             event_id=str(context.get("event_id", "")),
+        )
+
+    if notify_type == "match.status_changed":
+        match_request_id = context.get("match_request_id")
+        new_status = context.get("new_status")
+        if not match_request_id or not new_status:
+            raise ValueError("context.match_request_id and context.new_status required")
+        return await handle_match_request(
+            match_request_id=str(match_request_id),
+            new_status=str(new_status),
+            actor=str(context.get("actor", "organizer")),
         )
 
     if notify_type == "candidate.interview_schedule":
@@ -170,3 +193,56 @@ async def notify_bulk(request: BulkNotifyRequest):
     failed = len(results) - sent
 
     return BulkNotifyResponse(results=results, sent=sent, failed=failed)
+
+
+# ── POST /notify/test — test channel config ──────────────────────────────────
+
+
+class TestNotifyRequest(BaseModel):
+    channel: str  # "email", "sms", "zns"
+    event_id: int | None = None
+    tenant_id: int
+    recipient: dict  # {"email": "...", "phone": "..."}
+
+
+@router.post("/notify/test")
+async def notify_test(request: TestNotifyRequest):
+    """Send a test notification via a specific channel. Used by admin UI to verify config."""
+    try:
+        config = await get_channel_config(
+            request.channel, str(request.event_id) if request.event_id else None, str(request.tenant_id)
+        )
+        if not config:
+            raise HTTPException(status_code=404, detail=f"No {request.channel} provider configured")
+
+        provider = config.get("provider", "")
+        credentials = config.get("credentials") or {}
+        channel_config = config.get("config") or {}
+        ch = build_channel(request.channel, provider, credentials, channel_config)
+
+        recipient = NotificationRecipient(
+            email=request.recipient.get("email"),
+            phone=request.recipient.get("phone"),
+            name="Test User",
+        )
+
+        # Build test content per channel
+        content: dict
+        if request.channel == "email":
+            content = {
+                "subject": "[Nexpo] Test Notification",
+                "html": "<h2>Test Email</h2><p>This is a test notification from Nexpo.</p>",
+            }
+        elif request.channel == "sms":
+            content = {"body": "[Nexpo] Day la tin nhan thu nghiem / This is a test SMS."}
+        elif request.channel == "zns":
+            content = {"template_id": "test", "params": {"customer_name": "Test User"}}
+        else:
+            raise HTTPException(status_code=422, detail=f"Unknown channel: {request.channel}")
+
+        result = await ch.send(recipient, content)
+        return {"ok": result.success, "channel": request.channel, "provider": provider, "error": result.error}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
