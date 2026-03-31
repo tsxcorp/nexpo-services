@@ -113,7 +113,6 @@ def build_pdf_document(data: PDFApiRequest) -> bytes:
     elements.append(Paragraph("ĐƠN ĐẶT HÀNG", style_title))
     quote_number = data.quote_number_auto or ".................."
     elements.append(Paragraph(f"Số: {quote_number}", style_center_bold))
-    elements.append(Paragraph("Số hợp đồng: 01/2025/HĐGC/RC-NK FLEXIBLE", style_center_bold))
     elements.append(Spacer(1, 1*cm))
     
     # --- VENDOR & BUYER SECTION ---
