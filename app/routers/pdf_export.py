@@ -173,11 +173,18 @@ def build_pdf_document(data: PDFApiRequest) -> bytes:
     
     # Extract items
     processed_items = []
+    has_commercial_items = False
+    
     if data.quote_commercial and len(data.quote_commercial) > 0:
         for qc in data.quote_commercial:
-            if qc.quote_item: processed_items.append(qc.quote_item)
-    else:
-        for it in data.items: processed_items.append(it)
+            if qc.quote_item: 
+                processed_items.append(qc.quote_item)
+                has_commercial_items = True
+                
+    # Fallback to standard items if no valid items found in commercial
+    if not has_commercial_items and data.items:
+        for it in data.items: 
+            processed_items.append(it)
         
     for i, it in enumerate(processed_items):
         qty = float(it.total_quantity or 0)
