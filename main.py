@@ -54,6 +54,8 @@ app.add_middleware(
         "http://localhost:3001",
         "http://localhost:3002",
         "http://localhost:3003",
+        "https://cms.nexpo.vn",
+        "http://namkhoi.nexpo.vn"
     ],
     allow_credentials=True,
     allow_methods=["*"],
