@@ -43,9 +43,10 @@ from app.services.notification_handlers import (
 )
 from app.services.handlers.match_request_handler import handle_match_request
 from app.services.notification_dispatcher import dispatch_multi_channel
-from app.services.notification_config import get_channel_config
+from app.services.notification_config import get_trigger_channels, get_channel_config
 from app.services.channels.base_channel import NotificationRecipient
 from app.services.channels.channel_factory import build_channel
+from app.services.directus import directus_get
 
 router = APIRouter()
 
@@ -53,11 +54,75 @@ MEETING_TRIGGERS = {"meeting.scheduled", "meeting.confirmed", "meeting.cancelled
 BULK_SIZE_LIMIT = 50  # hard cap per request
 
 
+# ── Helper: resolve tenant_id from event_id ──────────────────────────────────
+
+async def _resolve_tenant_id(event_id: str | None) -> str | None:
+    """Get tenant_id from event record. Returns None on failure."""
+    if not event_id:
+        return None
+    try:
+        resp = await directus_get(f"/items/events/{event_id}?fields[]=tenant_id")
+        return str((resp.get("data") or {}).get("tenant_id", "")) or None
+    except Exception:
+        return None
+
+
+# ── Multi-channel follow-up: send SMS/ZNS after legacy email handler ─────────
+
+async def _dispatch_extra_channels(
+    notify_type: str,
+    event_id: str | None,
+    tenant_id: str | None,
+    recipient_email: str = "",
+    recipient_phone: str = "",
+    recipient_name: str = "",
+    registration_id: str | None = None,
+    variables: dict | None = None,
+) -> dict | None:
+    """After legacy email handler succeeds, send via any extra configured channels (SMS, ZNS).
+
+    Only sends non-email channels. If admin configured custom email via
+    notification_channel_configs, that's handled separately in dispatch_multi_channel.
+    Returns None if no extra channels configured.
+    """
+    if not event_id:
+        return None
+    if not tenant_id:
+        tenant_id = await _resolve_tenant_id(event_id)
+    if not tenant_id:
+        return None
+
+    try:
+        channels = await get_trigger_channels(notify_type, event_id, tenant_id)
+        # Only dispatch non-email channels — email already sent by legacy handler
+        extra_channels = [ch for ch in channels if ch != "email"]
+        if not extra_channels:
+            return None
+
+        recipient = NotificationRecipient(
+            email=recipient_email,
+            phone=recipient_phone,
+            name=recipient_name,
+        )
+        return await dispatch_multi_channel(
+            trigger_type=notify_type,
+            recipient=recipient,
+            variables=variables or {},
+            event_id=event_id,
+            tenant_id=tenant_id,
+            registration_id=registration_id,
+        )
+    except Exception:
+        return None  # never crash the legacy flow over extra channels
+
+
 # ── Dispatcher — shared by single + bulk ─────────────────────────────────────
 
 async def _dispatch(notify_type: str, item_id: str | None, context: dict) -> dict:
     """
     Route a notification type to its handler.
+    1. Legacy handler sends email (always)
+    2. Then dispatch extra channels (SMS/ZNS) if admin configured them
     Returns handler result dict (always includes at least status info).
     Raises ValueError for unknown types, Exception for handler errors.
     """
@@ -66,31 +131,55 @@ async def _dispatch(notify_type: str, item_id: str | None, context: dict) -> dic
         if not meeting_id:
             raise ValueError("meeting_id required (via ids[] or context.meeting_id)")
         trigger = notify_type.split(".", 1)[1]  # "scheduled" | "confirmed" | "cancelled"
-        return await handle_meeting(meeting_id=str(meeting_id), trigger=trigger)
+        result = await handle_meeting(meeting_id=str(meeting_id), trigger=trigger)
+        # Send extra channels (SMS/ZNS) if configured
+        await _dispatch_extra_channels(
+            notify_type, event_id=context.get("event_id"),
+            tenant_id=context.get("tenant_id"),
+            recipient_phone=result.get("recipient_phone", ""),
+            recipient_name=result.get("visitor_name", ""),
+            variables=result.get("variables", {}),
+        )
+        return result
 
     if notify_type == "registration.qr_email":
         registration_id = item_id or context.get("registration_id")
         if not registration_id:
             raise ValueError("registration_id required (via ids[] or context.registration_id)")
         triggered_by = context.get("triggered_by", "admin")
-        return await handle_registration_qr(
+        result = await handle_registration_qr(
             registration_id=str(registration_id),
             triggered_by=str(triggered_by),
         )
+        # Send extra channels (SMS/ZNS) if configured
+        await _dispatch_extra_channels(
+            notify_type, event_id=context.get("event_id"),
+            tenant_id=context.get("tenant_id"),
+            recipient_email=result.get("email", ""),
+            recipient_phone=result.get("recipient_phone", ""),
+            recipient_name=result.get("visitor_name", ""),
+            registration_id=str(registration_id),
+            variables=result.get("variables", {}),
+        )
+        return result
 
     if notify_type == "order.facility.created":
         order_id = context.get("order_id")
         event_id = context.get("event_id")
         if not order_id or not event_id:
             raise ValueError("context.order_id and context.event_id required")
-        return await handle_order_facility_created(order_id=str(order_id), event_id=str(event_id))
+        result = await handle_order_facility_created(order_id=str(order_id), event_id=str(event_id))
+        await _dispatch_extra_channels(notify_type, event_id=str(event_id), tenant_id=context.get("tenant_id"), variables=result.get("variables", {}))
+        return result
 
     if notify_type == "ticket.support.created":
         ticket_id = context.get("ticket_id")
         event_id = context.get("event_id")
         if not ticket_id or not event_id:
             raise ValueError("context.ticket_id and context.event_id required")
-        return await handle_ticket_support_created(ticket_id=str(ticket_id), event_id=str(event_id))
+        result = await handle_ticket_support_created(ticket_id=str(ticket_id), event_id=str(event_id))
+        await _dispatch_extra_channels(notify_type, event_id=str(event_id), tenant_id=context.get("tenant_id"), variables=result.get("variables", {}))
+        return result
 
     if notify_type == "lead.captured":
         user_id = context.get("user_id", "")
@@ -122,11 +211,16 @@ async def _dispatch(notify_type: str, item_id: str | None, context: dict) -> dic
             raise ValueError("registration_id required (via ids[] or context.registration_id)")
         if not event_id:
             raise ValueError("context.event_id required")
-        return await handle_candidate_interview_schedule(
+        result = await handle_candidate_interview_schedule(
             registration_id=str(registration_id),
             event_id=str(event_id),
             triggered_by=str(context.get("triggered_by", "admin")),
         )
+        await _dispatch_extra_channels(
+            notify_type, event_id=str(event_id), tenant_id=context.get("tenant_id"),
+            registration_id=str(registration_id), variables=result.get("variables", {}),
+        )
+        return result
 
     raise ValueError(f"Unknown notification type: {notify_type!r}")
 
