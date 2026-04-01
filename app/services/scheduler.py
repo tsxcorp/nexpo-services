@@ -13,6 +13,24 @@ import logging
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
+# Cache tenant timezone to avoid repeated Directus calls within a scheduler cycle
+_tz_cache: dict[str, str] = {}
+
+
+async def _get_tenant_timezone(event_id: str) -> str:
+    """Fetch tenant timezone for an event. Cached per event_id."""
+    if event_id in _tz_cache:
+        return _tz_cache[event_id]
+    try:
+        resp = await directus_get(
+            f"/items/events/{event_id}?fields[]=tenant_id.timezone"
+        )
+        tz = (resp.get("data", {}).get("tenant_id") or {}).get("timezone") or "Asia/Ho_Chi_Minh"
+    except Exception:
+        tz = "Asia/Ho_Chi_Minh"
+    _tz_cache[event_id] = tz
+    return tz
+
 
 async def expire_pending_orders() -> None:
     """
@@ -164,7 +182,11 @@ async def send_meeting_reminders() -> None:
         scheduled_at = meeting.get("scheduled_at", "")
         try:
             dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
-            time_str = dt.strftime("%d/%m/%Y %H:%M")
+            # Convert to tenant timezone for display in email
+            tenant_tz = await _get_tenant_timezone(event_id)
+            from zoneinfo import ZoneInfo
+            local_dt = dt.astimezone(ZoneInfo(tenant_tz))
+            time_str = local_dt.strftime("%d/%m/%Y %H:%M")
         except Exception:
             time_str = scheduled_at
 

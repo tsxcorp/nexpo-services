@@ -71,6 +71,27 @@ async def generate_email_template(request: GenerateEmailTemplateRequest):
                 "cta": False,
                 "section_title": "THÔNG TIN CUỘC HỌP / CANCELLED MEETING DETAILS",
             },
+            # New matching triggers
+            "match_approved": {
+                "subtitle": "Match Request Approved / Yêu Cầu Matching Đã Được Duyệt",
+                "status_bg": "#EFF6FF", "status_border": "#3B82F6", "status_color": "#1D4ED8",
+                "status_text": "✅ Yêu cầu matching đã được duyệt / Match request approved",
+                "recipient": "Exhibitor",
+                "greeting_hint": "Greet the exhibitor. Tell them a match request has been approved by the organizer and awaits their response.",
+                "closing_hint": "Ask them to log in to the portal to accept or decline the match.",
+                "cta": True,
+                "section_title": "THÔNG TIN MATCHING / MATCH REQUEST DETAILS",
+            },
+            "match_rejected": {
+                "subtitle": "Match Update / Cập Nhật Matching",
+                "status_bg": "#FFF7ED", "status_border": "#F97316", "status_color": "#9A3412",
+                "status_text": "❌ Yêu cầu matching không được duyệt / Match request was not approved",
+                "recipient": "Visitor",
+                "greeting_hint": "Greet the visitor. Express that their match request was not approved this time.",
+                "closing_hint": "Encourage them to explore other opportunities at the event.",
+                "cta": False,
+                "section_title": "THÔNG TIN MATCHING / MATCH DETAILS",
+            },
         }
         info = TRIGGER_INFO.get(trigger) or TRIGGER_INFO["confirmed_visitor"]
 
