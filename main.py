@@ -7,8 +7,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.services.scheduler import scheduler, send_meeting_reminders, expire_pending_orders
+from app.services.scheduler import scheduler, send_meeting_reminders, expire_pending_orders, send_trial_reminders
 from app.routers import qr, email, matching, meeting_notifs, notify, templates, pdf_export
+from app.routers import subscriptions, webhooks_polar, webhooks_payos_subscription, invoices, coupons
+from app.services.dunning_service import process_dunning
 
 
 @asynccontextmanager
@@ -34,6 +36,24 @@ async def lifespan(app: FastAPI):
         id='expire_pending_orders',
         replace_existing=True,
         misfire_grace_time=60,
+    )
+    scheduler.add_job(
+        process_dunning,
+        'cron',
+        hour=1,  # 8:00 AM VN time (UTC+7)
+        minute=0,
+        id='subscription_dunning',
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        send_trial_reminders,
+        'cron',
+        hour=1,  # 8:00 AM VN time (UTC+7)
+        minute=30,
+        id='trial_reminders',
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.start()
     yield
@@ -69,6 +89,11 @@ app.include_router(matching.router)
 app.include_router(meeting_notifs.router)
 app.include_router(templates.router)
 app.include_router(pdf_export.router)
+app.include_router(subscriptions.router)
+app.include_router(webhooks_polar.router)
+app.include_router(webhooks_payos_subscription.router)
+app.include_router(invoices.router)
+app.include_router(coupons.router)
 
 
 if __name__ == "__main__":

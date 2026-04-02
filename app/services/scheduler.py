@@ -2,12 +2,15 @@
 APScheduler setup and scheduled jobs.
 Import `scheduler` and call scheduler.start() / scheduler.shutdown() from lifespan.
 """
+import logging
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.config import DIRECTUS_ADMIN_TOKEN, PORTAL_URL
+from app.config import DIRECTUS_ADMIN_TOKEN, PORTAL_URL, ADMIN_URL
 from app.services.directus import directus_get, directus_patch, directus_delete
 from app.services.directus import resolve_visitor_email, resolve_exhibitor_email
 from app.services.mailgun import send_mailgun, meeting_notification_html
+
+logger = logging.getLogger(__name__)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -234,3 +237,66 @@ async def send_meeting_reminders() -> None:
                 )
             except Exception:
                 pass
+
+
+# ── Trial Reminder Emails ────────────────────────────────────────────────────
+
+async def send_trial_reminders():
+    """Send email reminders for trials ending in 7 days and 1 day."""
+    now = datetime.now(timezone.utc)
+
+    for days_left in [7, 1]:
+        target = now + timedelta(days=days_left)
+        target_start = target.replace(hour=0, minute=0, second=0)
+        target_end = target.replace(hour=23, minute=59, second=59)
+
+        try:
+            result = await directus_get(
+                f"/items/tenant_subscriptions"
+                f"?filter[status][_eq]=trialing"
+                f"&filter[trial_end][_gte]={target_start.isoformat()}"
+                f"&filter[trial_end][_lte]={target_end.isoformat()}"
+                f"&fields=tenant_id,trial_end"
+                f"&limit=50"
+            )
+            subs = result.get("data", [])
+            for sub in subs:
+                tenant_id = sub["tenant_id"]
+                try:
+                    tenant = await directus_get(f"/items/tenants/{tenant_id}?fields=email,name,subscription_tier")
+                    email = tenant.get("data", {}).get("email")
+                    name = tenant.get("data", {}).get("name", "")
+                    tier = tenant.get("data", {}).get("subscription_tier", "Pro")
+                    if email:
+                        subject = f"Nexpo: Dùng thử còn {days_left} ngày" if days_left > 1 else "Nexpo: Dùng thử kết thúc ngày mai"
+                        await send_mailgun(
+                            to=email,
+                            subject=subject,
+                            html=_trial_reminder_html(name, tier, days_left),
+                        )
+                        logger.info(f"Trial reminder sent: tenant={tenant_id}, days_left={days_left}")
+                except Exception as e:
+                    logger.error(f"Trial reminder error for tenant {tenant_id}: {e}")
+        except Exception as e:
+            logger.error(f"[trial_reminders] Failed to fetch trials ending in {days_left}d: {e}")
+
+
+def _trial_reminder_html(tenant_name: str, tier: str, days_left: int) -> str:
+    """HTML email for trial reminder."""
+    upgrade_url = f"{ADMIN_URL}/settings/subscription"
+    urgency = "⚡ Hành động ngay!" if days_left <= 1 else ""
+    return f"""
+    <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;padding:40px 20px;">
+      <div style="text-align:center;margin-bottom:30px;"><h1 style="color:#4F80FF;font-size:24px;margin:0;">NEXPO</h1></div>
+      <div style="background:#f8fafc;border-radius:12px;padding:30px;border:1px solid #e2e8f0;">
+        <h2 style="color:#1a1a1a;font-size:18px;margin:0 0 12px;">Dùng thử gói {tier} còn {days_left} ngày {urgency}</h2>
+        <p style="color:#404040;font-size:15px;line-height:1.6;margin:0 0 20px;">
+          Xin chào {tenant_name}, thời gian dùng thử sắp kết thúc.
+          Nâng cấp ngay để tiếp tục sử dụng đầy đủ tính năng.
+        </p>
+        <div style="text-align:center;margin:20px 0;">
+          <a href="{upgrade_url}" style="display:inline-block;background:#4F80FF;color:#fff;text-decoration:none;padding:12px 32px;border-radius:8px;font-weight:600;font-size:15px;">Nâng cấp ngay</a>
+        </div>
+        <p style="color:#94a3b8;font-size:13px;margin:15px 0 0;">Hoặc tài khoản sẽ tự động chuyển sang gói miễn phí sau khi hết thời gian dùng thử.</p>
+      </div>
+    </div>"""
