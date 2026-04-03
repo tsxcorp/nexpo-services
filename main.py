@@ -2,7 +2,6 @@
 nexpo-services — FastAPI application entry point.
 
 All endpoint logic lives in app/routers/. Shared helpers in app/services/.
-Version: 2026-04-03
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
