@@ -268,7 +268,7 @@ async def send_trial_reminders():
                     name = tenant.get("data", {}).get("name", "")
                     tier = tenant.get("data", {}).get("subscription_tier", "Pro")
                     if email:
-                        subject = f"Nexpo: Dùng thử còn {days_left} ngày" if days_left > 1 else "Nexpo: Dùng thử kết thúc ngày mai"
+                        subject = f"Nexpo: {days_left} Days Left in Trial / Dùng thử còn {days_left} ngày" if days_left > 1 else "Nexpo: Trial Ends Tomorrow / Dùng thử kết thúc ngày mai"
                         await send_mailgun(
                             to=email,
                             subject=subject,
@@ -284,20 +284,26 @@ async def send_trial_reminders():
 def _trial_reminder_html(tenant_name: str, tier: str, days_left: int) -> str:
     """HTML email for trial reminder."""
     upgrade_url = f"{ADMIN_URL}/settings/subscription"
-    urgency = "⚡ Hành động ngay!" if days_left <= 1 else ""
+    urgency = " ⚡" if days_left <= 1 else ""
     return f"""
     <div style="font-family:'Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;padding:40px 20px;">
       <div style="text-align:center;margin-bottom:30px;"><h1 style="color:#4F80FF;font-size:24px;margin:0;">NEXPO</h1></div>
       <div style="background:#f8fafc;border-radius:12px;padding:30px;border:1px solid #e2e8f0;">
-        <h2 style="color:#1a1a1a;font-size:18px;margin:0 0 12px;">Dùng thử gói {tier} còn {days_left} ngày {urgency}</h2>
-        <p style="color:#404040;font-size:15px;line-height:1.6;margin:0 0 20px;">
-          Xin chào {tenant_name}, thời gian dùng thử sắp kết thúc.
-          Nâng cấp ngay để tiếp tục sử dụng đầy đủ tính năng.
+        <h2 style="color:#1a1a1a;font-size:18px;margin:0 0 8px;">{days_left} Days Left in Your {tier} Trial{urgency}</h2>
+        <p style="color:#404040;font-size:15px;line-height:1.6;margin:0 0 16px;">
+          Hi {tenant_name}, your trial is ending soon. Upgrade now to keep full access to all features.
+        </p>
+        <h2 style="color:#64748b;font-size:16px;margin:0 0 8px;">Dùng thử gói {tier} còn {days_left} ngày{urgency}</h2>
+        <p style="color:#64748b;font-size:14px;line-height:1.6;margin:0 0 20px;">
+          Xin chào {tenant_name}, thời gian dùng thử sắp kết thúc. Nâng cấp ngay để tiếp tục sử dụng đầy đủ tính năng.
         </p>
         <div style="text-align:center;margin:20px 0;">
-          <a href="{upgrade_url}" style="display:inline-block;background:#4F80FF;color:#fff;text-decoration:none;padding:12px 32px;border-radius:8px;font-weight:600;font-size:15px;">Nâng cấp ngay</a>
+          <a href="{upgrade_url}" style="display:inline-block;background:#4F80FF;color:#fff;text-decoration:none;padding:12px 32px;border-radius:8px;font-weight:600;font-size:15px;">Upgrade Now / Nâng cấp ngay</a>
         </div>
-        <p style="color:#94a3b8;font-size:13px;margin:15px 0 0;">Hoặc tài khoản sẽ tự động chuyển sang gói miễn phí sau khi hết thời gian dùng thử.</p>
+        <p style="color:#94a3b8;font-size:13px;margin:15px 0 0;">
+          Your account will be automatically downgraded to the free plan after the trial ends.<br/>
+          Tài khoản sẽ tự động chuyển sang gói miễn phí sau khi hết thời gian dùng thử.
+        </p>
       </div>
     </div>"""
 

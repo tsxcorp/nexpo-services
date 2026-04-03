@@ -8,9 +8,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.scheduler import scheduler, send_meeting_reminders, expire_pending_orders, send_trial_reminders, expire_form_drafts
-from app.routers import qr, email, matching, meeting_notifs, notify, templates, pdf_export, floor_plan
+from app.routers import qr, email, matching, meeting_notifs, notify, templates, pdf_export, floor_plan, auth
 from app.routers import subscriptions, webhooks_polar, webhooks_payos_subscription, invoices, coupons
 from app.services.dunning_service import process_dunning
+from app.services.password_reset_service import cleanup_expired_tokens
 
 
 @asynccontextmanager
@@ -63,6 +64,14 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         misfire_grace_time=300,
     )
+    scheduler.add_job(
+        cleanup_expired_tokens,
+        'interval',
+        hours=6,
+        id='cleanup_password_reset_tokens',
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
     scheduler.start()
     yield
     scheduler.shutdown()
@@ -83,6 +92,8 @@ app.add_middleware(
         "http://localhost:3002",
         "http://localhost:3003",
         "https://cms.nexpo.vn",
+        "https://console.nexpo.vn",
+        "http://localhost:3004",
         "https://namkhoi.nexpo.vn"
     ],
     allow_credentials=True,
@@ -103,6 +114,7 @@ app.include_router(webhooks_payos_subscription.router)
 app.include_router(invoices.router)
 app.include_router(coupons.router)
 app.include_router(floor_plan.router)
+app.include_router(auth.router)
 
 
 if __name__ == "__main__":

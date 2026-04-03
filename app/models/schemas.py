@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, Field
+from typing import Literal, Optional, List
 
 
 # ── QR ────────────────────────────────────────────────────────────────────────
@@ -170,3 +170,30 @@ class DetectZonesRequest(BaseModel):
 class DetectZonesResponse(BaseModel):
     zones: List[DetectedZone]
     scale_hint: Optional[ScaleHint] = None
+
+
+# ── Password Reset (custom flow via Mailgun) ────────────────────────────────
+
+class PasswordResetRequest(BaseModel):
+    email: str
+    app: Literal["admin", "portal", "console"] = "admin"
+
+class PasswordResetResponse(BaseModel):
+    success: bool
+    message: str = ""
+
+class ValidateResetTokenRequest(BaseModel):
+    token: str
+
+class ValidateResetTokenResponse(BaseModel):
+    valid: bool
+    email: Optional[str] = None
+    error: Optional[str] = None
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)
+
+class ResetPasswordResponse(BaseModel):
+    success: bool
+    error: Optional[str] = None
