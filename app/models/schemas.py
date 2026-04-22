@@ -115,6 +115,58 @@ class MatchRunResponse(BaseModel):
     suggestions: List[MatchSuggestion] = []
 
 
+# ── AI Business Matching ─────────────────────────────────────────────────────
+
+class BusinessMatchRunRequest(BaseModel):
+    event_id: int
+    business_requirement_id: Optional[str] = None
+    exhibitor_id: Optional[str] = None
+    score_threshold: float = 0.5
+    max_candidates_per_requirement: int = 40
+    keyword_threshold: float = 0.15
+    rescore_pending: bool = True
+    ai_model: Literal["openai/gpt-4o-mini", "openai/gpt-4o"] = "openai/gpt-4o-mini"
+
+class BusinessMatchSuggestionOut(BaseModel):
+    business_requirement_id: str
+    registration_id: str
+    exhibitor_id: str
+    score: float
+    matched_criteria: dict
+    ai_reasoning: str
+
+class BusinessMatchRunResponse(BaseModel):
+    success: bool
+    message: str
+    suggestions_created: int
+    suggestions: List[BusinessMatchSuggestionOut] = []
+
+
+# ── AI Profile-based Business Matching ───────────────────────────────────────
+
+class ProfileMatchRunRequest(BaseModel):
+    event_id: int
+    exhibitor_id: Optional[str] = None
+    score_threshold: float = 0.5
+    max_candidates_per_exhibitor: int = 40
+    keyword_threshold: float = 0.0
+    rescore_pending: bool = True
+    ai_model: Literal["openai/gpt-4o-mini", "openai/gpt-4o"] = "openai/gpt-4o-mini"
+
+class ProfileMatchSuggestionOut(BaseModel):
+    exhibitor_id: str
+    registration_id: str
+    score: float
+    matched_criteria: dict
+    ai_reasoning: str
+
+class ProfileMatchRunResponse(BaseModel):
+    success: bool
+    message: str
+    suggestions_created: int
+    suggestions: List[ProfileMatchSuggestionOut] = []
+
+
 # ── Email Template Generation ─────────────────────────────────────────────────
 
 class EmailTemplateField(BaseModel):

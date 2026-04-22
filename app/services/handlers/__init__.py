@@ -1,1 +1,1 @@
-"""Notification handlers — modular handlers split from notification_handlers.py."""
+"""Notification handlers — per-type modules split from the former notification_handlers.py monolith."""
