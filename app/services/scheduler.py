@@ -160,7 +160,7 @@ async def send_meeting_reminders() -> None:
     try:
         resp = await directus_get(
             "/items/meetings"
-            f"?filter[status][_eq]=confirmed"
+            f"?filter[status][_in]=confirmed,scheduled"
             f"&filter[scheduled_at][_gte]={window_start}"
             f"&filter[scheduled_at][_lte]={window_end}"
             f"&filter[reminder_sent][_null]=true"

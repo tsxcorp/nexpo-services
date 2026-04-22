@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException
-import httpx
 from app.models.schemas import GenerateEmailTemplateRequest, GenerateEmailTemplateResponse, EmailStyleConfig
-from app.config import OPENROUTER_API_KEY
+from app.services.text_generator import generate_text, AllProvidersFailedError
 
 router = APIRouter()
 
@@ -9,8 +8,6 @@ router = APIRouter()
 @router.post("/generate-email-template", response_model=GenerateEmailTemplateResponse)
 async def generate_email_template(request: GenerateEmailTemplateRequest):
     """Generate a styled HTML email template using AI based on form fields and event context."""
-    if not OPENROUTER_API_KEY:
-        raise HTTPException(status_code=503, detail="OpenRouter API key not configured")
 
     # ── Brand settings ────────────────────────────────────────────────────────
     style = request.email_style or EmailStyleConfig()
@@ -258,7 +255,7 @@ Generate the complete HTML email now:"""
         form_context_title = form_context.title()
 
         field_list = "\n".join(
-            f'  - Variable: {{{{{f.id}}}}} | Label: "{f.label}" | Type: {f.type}'
+            f'  - Variable: ${{{f.id}}} | Label: "{f.label}" | Type: {f.type}'
             for f in request.fields
         ) or "  (none — use generic placeholder content)"
 
@@ -285,7 +282,7 @@ Generate the complete HTML email now:"""
         name_field_hint = ""
         for f in request.fields:
             if any(kw in f.label.lower() for kw in ["name", "họ tên", "tên", "full name", "họ và tên"]):
-                name_field_hint = f"Use {{{{{f.id}}}}} as the recipient's name in the greeting."
+                name_field_hint = f"Use ${{{f.id}}} as the recipient's name in the greeting."
                 break
 
         prompt = f"""You are a world-class HTML email designer. Create a stunning, polished HTML email template for a {form_context} email. Think of award-winning transactional emails from top tech companies.
@@ -372,7 +369,7 @@ Do NOT split the outer card, header, greeting, section headers, QR, or footer in
      - Left cell: the field's Label text from the FORM FIELDS list, UPPERCASE, 12px, color #64748B, font-weight: 600, padding: 12px 16px
        ⚠️ If bilingual: show BOTH languages in label cell, e.g. "HỌ VÀ TÊN / FULL NAME"
        ⚠️ MUST include a row for EVERY field listed in FORM FIELDS — do not skip any field
-     - Right cell: use the exact variable syntax from FORM FIELDS above — keep double-curly format e.g. {{{{company_name}}}}, {{{{visitor_name}}}}. Font: 15px, color #1E293B, font-weight: 500, padding: 12px 16px
+     - Right cell: use the exact variable syntax from FORM FIELDS above — keep DOLLAR-CURLY format (e.g. ${{field_uuid}}) NOT double-curly. Font: 15px, color #1E293B, font-weight: 500, padding: 12px 16px
      - Thin bottom border: 1px solid #E2E8F0 (skip on last row)
    - Bottom of section: 4px gradient bar (same as header decorative bar)
 
@@ -448,31 +445,19 @@ STRICT RULES:
 Generate the complete HTML email now:"""
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "openai/gpt-4o",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.4,
-                    "max_tokens": 6000,
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            html = result["choices"][0]["message"]["content"].strip()
-
-            if html.startswith("```"):
-                lines = html.split("\n")
-                html = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-            return GenerateEmailTemplateResponse(html=html, success=True)
-
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"OpenRouter error: {e.response.text[:200]}")
+        html, provider = await generate_text(prompt, temperature=0.4, max_tokens=6000)
+    except AllProvidersFailedError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+    # Strip any preamble/postamble, markdown fences, etc. Keep only <!DOCTYPE...</html>.
+    import re
+    m = re.search(r'<!DOCTYPE[\s\S]*</html>', html, re.IGNORECASE)
+    if m:
+        html = m.group(0)
+    elif html.startswith("```"):
+        lines = html.split("\n")
+        html = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+    return GenerateEmailTemplateResponse(html=html, success=True)
